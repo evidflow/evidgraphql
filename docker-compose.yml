@@ -1,0 +1,91 @@
+version: '3.8'
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    ports:
+      - "9092:9092"
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - "8080:8080"
+
+  auth-service:
+    build: ./services/auth
+    ports:
+      - "4002:4002"
+    environment:
+      - NODE_ENV=development
+      - PORT=4002
+      - SERVICE_NAME=auth-service
+      - JWT_SECRET=your-super-secret-jwt-key-here
+      - DATABASE_URL=postgresql://avnadmin:AVNS_W5hwUrg273IWQquF4J7@pg-19ca8e4a-petergatitu61-111d.e.aivencloud.com:14741/evidflow_db
+      - KAFKA_BROKER=kafka:9092
+    depends_on:
+      - kafka
+
+  org-service:
+    build: ./services/organizations
+    ports:
+      - "4004:4004"
+    environment:
+      - NODE_ENV=development
+      - PORT=4004
+      - SERVICE_NAME=org-service
+      - DATABASE_URL=postgresql://avnadmin:AVNS_W5hwUrg273IWQquF4J7@pg-19ca8e4a-petergatitu61-111d.e.aivencloud.com:14741/evidflow_db
+      - KAFKA_BROKER=kafka:9092
+    depends_on:
+      - kafka
+
+  email-service:
+    build: ./services/email
+    ports:
+      - "8010:8010"
+    environment:
+      - NODE_ENV=development
+      - FRONTEND_URL=http://api.evidflow.com
+      - PORT=8010
+      - SERVICE_NAME=email-service
+      - KAFKA_BROKER=kafka:9092
+      - RESEND_API_KEY=re_XhCdy6P7_7poeNWRaBbYwQSx1xRmSHpRD
+      - FROM_EMAIL=EvidFlow <nonreply@evidflow.com>
+    depends_on:
+      - kafka
+
+  gateway:
+    build: ./gateway
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - AUTH_SERVICE_URL=http://auth-service:4002
+      - ORG_SERVICE_URL=http://org-service:4004
+      - EMAIL_SERVICE_URL=http://email-service:8010
+    depends_on:
+      - auth-service
+      - org-service
+      - email-service

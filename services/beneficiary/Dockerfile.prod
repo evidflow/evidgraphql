@@ -1,0 +1,19 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY . .
+
+# Install dependencies
+RUN npm install --production
+
+# Create necessary directories
+RUN mkdir -p logs
+
+# Expose port
+EXPOSE 4006
+
+# Start the service
+CMD ["npm", "start"]

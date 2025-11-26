@@ -1,0 +1,10 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "EvidFlow Production Metrics",
+    "tags": ["evidflow", "production"],
+    "timezone": "browser",
+    "panels": [],
+    "version": 1
+  }
+}
