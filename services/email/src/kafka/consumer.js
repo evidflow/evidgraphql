@@ -10,9 +10,9 @@ const kafka = new Kafka({
 });
 
 export class KafkaConsumer {
-    constructor() {
+    constructor(groupId) {
         this.consumer = kafka.consumer({ 
-            groupId: 'email-service-group',
+            groupId: groupId || 'email-service-group',
             sessionTimeout: 30000,
             heartbeatInterval: 10000,
         });
@@ -57,10 +57,9 @@ export class KafkaConsumer {
                         console.log(`📨 Email Service - Received message from topic: ${topic}`, {
                             partition,
                             offset: message.offset,
-                            value
+                            event_id: value?.event_id
                         });
 
-                        // Call the appropriate handler based on topic
                         const handler = this.handlers.get(topic);
                         if (handler) {
                             await handler(value);
@@ -70,7 +69,6 @@ export class KafkaConsumer {
                         }
                     } catch (error) {
                         console.error(`❌ Email Service - Error processing message from topic ${topic}:`, error.message);
-                        // Don't throw to avoid stopping the consumer
                     }
                 },
             });
@@ -79,7 +77,6 @@ export class KafkaConsumer {
             console.log('✅ Email Service - Kafka consumer is running');
         } catch (error) {
             console.error('❌ Email Service - Kafka consumer failed to run:', error.message);
-            // Retry connection after delay
             setTimeout(() => this.run(), 10000);
         }
     }

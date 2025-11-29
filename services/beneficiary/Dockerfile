@@ -1,0 +1,21 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy source code
+COPY src/ ./src/
+
+# Create necessary directories
+RUN mkdir -p ./src/kafka ./src/utils
+
+# Expose port
+EXPOSE 4006
+
+# Start the service
+CMD ["npm", "start"]
