@@ -44,3 +44,19 @@ export const clearAuthCookie = (res) => {
     path: '/'
   });
 };
+
+export const getTokenFromCookie = (req) => {
+  return req.cookies?.auth_token || null;
+};
+
+export const getTokenFromHeader = (req) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authHeader.substring(7);
+  }
+  return null;
+};
+
+export const getToken = (req) => {
+  return getTokenFromCookie(req) || getTokenFromHeader(req);
+};
