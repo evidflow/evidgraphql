@@ -1,16 +1,24 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
+import cookieParser from 'cookie-parser';
 import 'dotenv/config';
 import { initializeDatabase, testConnection, pool } from './utils/database.js';
-import { hashPassword, verifyPassword, createToken, verifyToken } from './utils/auth.js';
+import { 
+  hashPassword, 
+  verifyPassword, 
+  createToken, 
+  verifyToken,
+  setAuthCookie, 
+  clearAuthCookie, 
+  getToken
+} from './utils/auth.js';
 import { kafkaProducer } from './kafka/producer.js';
 import { TOPICS } from './kafka/config.js';
 import KafkaConsumer from './kafka/consumer.js';
 
 // ==================== ERROR CODES ====================
 const ERROR_CODES = {
-  // Authentication errors
   AUTH_MISSING_TOKEN: 'AUTH_001',
   AUTH_INVALID_TOKEN: 'AUTH_002',
   AUTH_EXPIRED_TOKEN: 'AUTH_003',
@@ -19,14 +27,12 @@ const ERROR_CODES = {
   AUTH_ACCOUNT_LOCKED: 'AUTH_006',
   AUTH_ACCOUNT_DEACTIVATED: 'AUTH_007',
   
-  // Validation errors
   VALIDATION_MISSING_FIELDS: 'VAL_001',
   VALIDATION_INVALID_EMAIL: 'VAL_002',
   VALIDATION_WEAK_PASSWORD: 'VAL_003',
   VALIDATION_INVALID_CODE: 'VAL_004',
   VALIDATION_INVALID_TOKEN: 'VAL_005',
   
-  // Business logic errors
   BUSINESS_USER_EXISTS: 'BIZ_001',
   BUSINESS_EMAIL_NOT_VERIFIED: 'BIZ_002',
   BUSINESS_INVALID_CREDENTIALS: 'BIZ_003',
@@ -37,13 +43,11 @@ const ERROR_CODES = {
   BUSINESS_ALREADY_MEMBER: 'BIZ_008',
   BUSINESS_VERIFICATION_ALREADY_SENT: 'BIZ_009',
   
-  // System errors
   SYSTEM_DATABASE_ERROR: 'SYS_001',
   SYSTEM_KAFKA_ERROR: 'SYS_002',
   SYSTEM_INTERNAL_ERROR: 'SYS_003',
   SYSTEM_RATE_LIMITED: 'SYS_004',
   
-  // Resource errors
   RESOURCE_NOT_FOUND: 'RES_001',
   RESOURCE_ALREADY_EXISTS: 'RES_002',
   RESOURCE_CONFLICT: 'RES_003'
@@ -52,28 +56,53 @@ const ERROR_CODES = {
 const app = express();
 const PORT = process.env.PORT || 4002;
 
-// ==================== PRODUCTION MIDDLEWARE ====================
+// ==================== MIDDLEWARE SETUP ====================
+
+// Cookie parser middleware
+app.use(cookieParser());
 
 // Security headers
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  // Only set HSTS in production
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
   next();
 });
 
-// CORS configuration
-app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [
-    'http://localhost:3000',
-    'http://localhost:3001'
-  ],
+// CORS configuration - UPDATED FOR BETTER COOKIE SUPPORT
+const corsOptions = {
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like curl, mobile apps, etc.)
+    if (!origin && process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    
+    const allowedOrigins = process.env.ALLOWED_ORIGINS 
+      ? process.env.ALLOWED_ORIGINS.split(',') 
+      : ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:4002'];
+    
+    if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
+      callback(null, true);
+    } else {
+      console.error(`❌ CORS blocked origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cookie', 'Set-Cookie'],
+  exposedHeaders: ['Set-Cookie', 'Authorization'],
   maxAge: 86400
-}));
+};
+
+app.use(cors(corsOptions));
+
+// Handle preflight requests
+app.options('*', cors(corsOptions));
 
 // Rate limiting
 const rateLimitStore = new Map();
@@ -121,9 +150,16 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '10mb' }));
 
-// Request logging
+// Request logging middleware
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - IP: ${req.ip}`);
+  const startTime = Date.now();
+  
+  // Log after response is sent
+  res.on('finish', () => {
+    const duration = Date.now() - startTime;
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - ${res.statusCode} - ${duration}ms`);
+  });
+  
   next();
 });
 
@@ -191,7 +227,7 @@ async function initializeApp() {
   try {
     console.log('🚀 Initializing Production Auth Service...');
     
-    const requiredEnvVars = ['JWT_SECRET', 'DATABASE_URL', 'KAFKA_BROKER'];
+    const requiredEnvVars = ['JWT_SECRET', 'DATABASE_URL'];
     const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
     if (missingVars.length > 0) {
       throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
@@ -212,7 +248,12 @@ async function initializeApp() {
     await initializeDatabase();
     console.log('✅ Database initialized successfully');
 
-    await initializeKafkaConsumer();
+    // Initialize Kafka if broker is available
+    if (process.env.KAFKA_BROKER) {
+      await initializeKafkaConsumer();
+    } else {
+      console.log('⚠️ Kafka broker not configured, skipping Kafka initialization');
+    }
 
     console.log('🎉 Production Auth Service initialized successfully');
     
@@ -231,9 +272,9 @@ initializeApp().catch(error => {
 
 const authenticateToken = async (req, res, next) => {
   try {
-    const authHeader = req.headers.authorization;
+    const token = getToken(req);
     
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (!token) {
       return res.status(401).json({
         success: false,
         error: 'Authorization token required',
@@ -241,8 +282,6 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
-    const token = authHeader.substring(7);
-    
     if (token.length < 10) {
       return res.status(401).json({
         success: false,
@@ -270,7 +309,7 @@ const authenticateToken = async (req, res, next) => {
     req.user = userResult.rows[0];
     next();
   } catch (error) {
-    console.error('Token verification error:', error);
+    console.error('Token verification error:', error.message);
     
     const errorCode = error.name === 'TokenExpiredError' 
       ? ERROR_CODES.AUTH_EXPIRED_TOKEN 
@@ -349,16 +388,30 @@ app.get('/health', async (req, res) => {
   }
 });
 
+// Cookie debugging endpoint
+app.get('/auth/debug-cookies', (req, res) => {
+  res.json({
+    success: true,
+    cookies: req.cookies,
+    headers: {
+      cookie: req.headers.cookie,
+      authorization: req.headers.authorization
+    }
+  });
+});
+
 app.get('/', (req, res) => {
   res.json({
     service: 'EvidFlow Auth Service',
     version: '1.0.0',
     environment: process.env.NODE_ENV || 'development',
     status: 'operational',
+    cookie_support: 'enabled',
     endpoints: [
       'POST /auth/register - User registration',
       'POST /auth/login - User login',
       'GET /auth/me - Get current user',
+      'POST /auth/logout - User logout',
       'POST /auth/verify-email - Verify email',
       'POST /auth/resend-verification - Resend verification',
       'POST /auth/forgot-password - Forgot password',
@@ -516,7 +569,7 @@ app.post('/auth/register', async (req, res) => {
   }
 });
 
-// POST /auth/login - User login
+// POST /auth/login - User login (UPDATED COOKIE SETTINGS)
 app.post('/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -613,6 +666,22 @@ app.post('/auth/login', async (req, res) => {
       role: user.role
     });
 
+    // Set cookie with proper settings for curl testing
+    const isProduction = process.env.NODE_ENV === 'production';
+    
+    res.cookie('auth_token', token, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? 'strict' : 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      path: '/',
+      // Don't set domain for localhost
+      ...(isProduction && { domain: '.yourdomain.com' })
+    });
+
+    console.log(`✅ Login successful for: ${user.email}`);
+    console.log(`🍪 Cookie set for ${user.email}`);
+
     await sendKafkaEvent('user.login', {
       user_id: user.id,
       email: user.email
@@ -639,6 +708,24 @@ app.post('/auth/login', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Login failed',
+      code: ERROR_CODES.SYSTEM_INTERNAL_ERROR
+    });
+  }
+});
+
+// POST /auth/logout - Clear authentication cookie
+app.post('/auth/logout', (req, res) => {
+  try {
+    clearAuthCookie(res);
+    res.json({
+      success: true,
+      message: 'Logged out successfully'
+    });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Logout failed',
       code: ERROR_CODES.SYSTEM_INTERNAL_ERROR
     });
   }
@@ -1515,21 +1602,26 @@ app.use((error, req, res, next) => {
 // ==================== SERVER STARTUP ====================
 
 app.listen(PORT, () => {
-  console.log(`🔐 Production Auth Service running on port ${PORT}`);
-  console.log(`🏥 Health: http://localhost:${PORT}/health`);
-  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔑 Available endpoints:`);
-  console.log(`   POST /auth/register - User registration`);
-  console.log(`   POST /auth/login - User login`);
-  console.log(`   GET /auth/me - Get current user`);
-  console.log(`   POST /auth/verify-email - Verify email`);
-  console.log(`   POST /auth/resend-verification - Resend verification`);
-  console.log(`   POST /auth/forgot-password - Forgot password`);
-  console.log(`   POST /auth/reset-password - Reset password`);
-  console.log(`   POST /auth/invitations/send - Send invitation`);
-  console.log(`   GET /auth/invitations/:token - Get invitation details`);
-  console.log(`   POST /auth/invitations/accept - Accept invitation`);
-  console.log(`   PUT /auth/profile - Update profile`);
+  console.log(`
+  🔐 Production Auth Service
+  📍 Port: ${PORT}
+  🏥 Health: http://localhost:${PORT}/health
+  🌐 Environment: ${process.env.NODE_ENV || 'development'}
+  🍪 Cookie Auth: Enabled
+  🔑 Available endpoints:
+     POST /auth/register - User registration
+     POST /auth/login - User login (sets cookie)
+     POST /auth/logout - User logout (clears cookie)
+     GET /auth/me - Get current user
+     POST /auth/verify-email - Verify email
+     POST /auth/resend-verification - Resend verification
+     POST /auth/forgot-password - Forgot password
+     POST /auth/reset-password - Reset password
+     POST /auth/invitations/send - Send invitation
+     GET /auth/invitations/:token - Get invitation details
+     POST /auth/invitations/accept - Accept invitation
+     PUT /auth/profile - Update profile
+  `);
 });
 
 // Graceful shutdown
